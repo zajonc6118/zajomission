@@ -7,7 +7,7 @@
 #include <array>
 
 #ifndef OMISSION_LARGE_BIOMES
-#define OMISSION_LARGE_BIOMES 1
+#define OMISSION_LARGE_BIOMES 0
 #endif
 #if OMISSION_LARGE_BIOMES
 constexpr bool large_biomes = true;

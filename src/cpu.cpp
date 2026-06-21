@@ -1,29 +1,30 @@
 #include "cpu.h"
 #include "cubiomes.h"
 
+#include <cinttypes>
 #include <optional>
 #include <chrono>
 
-std::optional<CpuOutput> process(Cubiomes *cubiomes, const GpuOutput &input) {
-    constexpr int32_t small_biomes_pos_div = large_biomes ? 1 : 4;
-    constexpr int32_t small_biomes_area_div = small_biomes_pos_div * small_biomes_pos_div;
-
+std::optional<CpuOutput> process(Cubiomes *cubiomes, int32_t min_size, const GpuOutput &input) {
     // return {{ input.seed, input.x, input.z, 0 }};
 
     cubiomes_apply_seed(cubiomes, input.seed);
 
-    int32_t range = 40000 / small_biomes_pos_div;
-    int32_t min_area = (large_biomes ? 92'000'000 : 80'000'000) / small_biomes_area_div;
+    int32_t range = 10000 * (large_biomes ? 4 : 1);
 
-    if (!cubiomes_test_monte_carlo(cubiomes, input.x, input.z, range, (double)min_area / (range * range), 0.999)) {
+    if (!cubiomes_test_monte_carlo(cubiomes, input.x, input.z, range, min_size, 0.999)) {
         // std::printf("Test %" PRIi64 " %" PRIi32 " %" PRIi32 " failed monteCarloBiomes\n", input.seed, input.x, input.z);
         return {};
     }
 
-    min_area = 80'000'000 / small_biomes_area_div;
+    if (!cubiomes_test_biome_centers(cubiomes, input.x, input.z, range, min_size, 16, 4, nullptr)) {
+        // std::printf("Test %" PRIi64 " %" PRIi32 " %" PRIi32 " failed getBiomeCenters at scale 16\n", input.seed, input.x, input.z);
+        return {};
+    }
+
     PosArea res;
-    if (!cubiomes_test_biome_centers(cubiomes, input.x, input.z, range, min_area, &res)) {
-        // std::printf("Test %" PRIi64 " %" PRIi32 " %" PRIi32 " failed getBiomeCenters\n", input.seed, input.x, input.z);
+    if (!cubiomes_test_biome_centers(cubiomes, input.x, input.z, range, min_size, 4, 2, &res)) {
+        // std::printf("Test %" PRIi64 " %" PRIi32 " %" PRIi32 " failed getBiomeCenters at scale 4\n", input.seed, input.x, input.z);
         return {};
     }
 
@@ -31,7 +32,7 @@ std::optional<CpuOutput> process(Cubiomes *cubiomes, const GpuOutput &input) {
     return {{ input.seed, res.x, res.z, res.area }};
 }
 
-CpuThread::CpuThread(int id, GpuOutputs &inputs, CpuOutputs &outputs) : Thread(), id(id), inputs(inputs), outputs(outputs) {
+CpuThread::CpuThread(int id, int32_t min_size, GpuOutputs &inputs, CpuOutputs &outputs) : Thread(), id(id), min_size(min_size), inputs(inputs), outputs(outputs) {
     start();
 }
 
@@ -55,7 +56,7 @@ void CpuThread::run() {
 
         const auto start = std::chrono::steady_clock::now();
 
-        const auto output = process(cubiomes, input);
+        const auto output = process(cubiomes, min_size, input);
 
         const auto end = std::chrono::steady_clock::now();
         double time_total = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count() * 1e-9;

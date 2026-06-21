@@ -289,7 +289,7 @@ struct XrsrRandom {
         return a ^ a >> 30 ^ a >> 60;
     }
 
-    HOST_DEVICE static uint64_t rol64(uint64_t a, int bits) {
+    HOST_DEVICE constexpr static uint64_t rol64(uint64_t a, int bits) {
         return (a << bits) | (a >> (64 - bits));
     }
 
@@ -300,7 +300,7 @@ struct XrsrRandom {
 
     }
 
-    HOST_DEVICE XrsrRandom(uint64_t lo, uint64_t hi) : lo(lo), hi(hi) {
+    HOST_DEVICE constexpr XrsrRandom(uint64_t lo, uint64_t hi) : lo(lo), hi(hi) {
         if ((this->lo | this->hi) == 0) {
             this->lo = static_cast<uint64_t>(-7046029254386353131);
             this->hi = static_cast<uint64_t>(7640891576956012809);
@@ -326,7 +326,7 @@ struct XrsrRandom {
         }
     }
 
-    HOST_DEVICE uint64_t nextInternal() {
+    HOST_DEVICE constexpr uint64_t nextInternal() {
         uint64_t l = this->lo;
         uint64_t h = this->hi;
         uint64_t r = rol64(l + h, 17) + l;

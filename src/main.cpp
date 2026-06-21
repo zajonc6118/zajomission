@@ -18,6 +18,7 @@
 #include <optional>
 #include <charconv>
 #include <algorithm>
+#include <random>
 
 #ifdef NO_GPU
 constexpr bool no_gpu = true;
@@ -34,22 +35,6 @@ constexpr bool no_net = true;
 #else
 constexpr bool no_net = false;
 #endif
-
-#ifdef BOINC
-  #include "boinc_api.h"
-  struct checkpoint_vars {
-    unsigned long long offset;
-    double elapsed_chkpoint;
-  };
-
-  double elapsed_chkpoint = 0.00;
-  
-#if defined _WIN32 || defined _WIN64
-  #include "boinc_win.h"
-#endif
-#endif
-
-
 
 std::optional<HostService> split_address(std::string_view address) {
     size_t i = address.find_last_of(':');
@@ -74,14 +59,30 @@ bool check_argument(int argc, int i, const char *option) {
     return false;
 }
 
+template<typename T, typename F>
+bool parse_argument_int(int argc, const char *const *argv, int &i, std::optional<T> &out, F &&test, const char *option) {
+    if (check_duplicate((bool)out, option)) return false;
+    if (check_argument(argc, i, argv[i - 1])) return false;
+    const char *arg_val = argv[i++];
+    const char *arg_val_end = arg_val + std::strlen(arg_val);
+    T val;
+    auto [ptr, ec] = std::from_chars(arg_val, arg_val_end, val);
+    if (ec != std::errc() || ptr != arg_val_end || !test(val)) {
+        std::fprintf(stderr, "invalid argument to %s: %s\n", option, arg_val);
+        return false;
+    }
+    out = val;
+    return true;
+}
+
 struct Args {
     std::vector<int> devices;
     std::optional<int> threads;
     std::optional<HostService> client;
     std::optional<HostService> server;
     std::optional<std::string> output_file;
-    uint64_t start_seed;
-    uint64_t end_seed;
+    std::optional<int64_t> start_seed;
+    std::optional<int32_t> min_size;
 
     bool parse(int argc, const char **const argv) {
         for (int i = 1; i < argc;) {
@@ -104,14 +105,7 @@ struct Args {
                     if (first != last) first++;
                 }
             } else if (std::strcmp("--threads", arg) == 0) {
-                if (check_duplicate((bool)threads, arg)) return false;
-                if (check_argument(argc, i, arg)) return false;
-                int threads_val = std::atoi(argv[i++]);
-                if (threads_val <= 0 || threads_val > 1024) {
-                    std::fprintf(stderr, "invalid argument to --threads: %d\n", threads_val);
-                    return false;
-                }
-                threads = threads_val;
+                if (!parse_argument_int(argc, argv, i, threads, [](int threads){ return threads >= 1 && threads <= 1024; }, arg)) return false;
             } else if (std::strcmp("--client", arg) == 0) {
                 if (check_duplicate((bool)client, arg)) return false;
                 if (check_argument(argc, i, arg)) return false;
@@ -132,19 +126,11 @@ struct Args {
                 if (check_duplicate((bool)output_file, arg)) return false;
                 if (check_argument(argc, i, arg)) return false;
                 output_file = argv[i++];
-            } 
-            #ifdef BOINC
-              else if (std::strcmp("--start", arg) == 0) {
-                if (check_duplicate((bool)start_seed, arg)) return false;
-                if (check_argument(argc, i ,arg)) return false;
-                start_seed = atoll(argv[i++]);
-            } else if (std::strcmp("--end", arg) == 0) {
-                if (check_duplicate((bool)end_seed, arg)) return false;
-                if (check_argument(argc, i ,arg)) return false;
-                end_seed = atoll(argv[i++]);
-            } 
-            #endif
-              else {
+            } else if (std::strcmp("--start", arg) == 0) {
+                if (!parse_argument_int(argc, argv, i, start_seed, [](int64_t start_seed){ return true; }, arg)) return false;
+            } else if (std::strcmp("--size", arg) == 0) {
+                if (!parse_argument_int(argc, argv, i, min_size, [](int32_t min_size){ return min_size >= 0; }, arg)) return false;
+            } else {
                 std::fprintf(stderr, "unknown option: %s\n", arg);
                 return false;
             }
@@ -160,27 +146,47 @@ struct Args {
             return false;
         }
 
-        #ifndef BOINC
         if (devices.empty() && !server) {
             devices.push_back(0);
         }
-        #endif
+
+        if (start_seed && devices.empty()) {
+            std::fprintf(stderr, "--start does nothing when not running gpus\n");
+            return false;
+        }
+
+        if (min_size && !threads && client) {
+            std::fprintf(stderr, "--size does nothing when not running cpu threads\n");
+            return false;
+        }
+
         return true;
     }
 };
 
+uint64_t random_start_seed() {
+    std::random_device device;
+    return ((uint64_t)device() << 32) + (uint64_t)device();
+}
+
 int main_inner(int argc, char **argv) {
     Args args{};
     if (!args.parse(argc, const_cast<const char **const>(argv))) {
-        std::printf("Usage:\n%s [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>]\n", argv[0]);
+        std::fprintf(stderr, "Usage:\n%s [--device <device>,<device>,...] [--threads <threads>] [--client <server_address>] [--server <listen_address>] [--output <output_file>] [--start <start_seed>] [--size <min_size>]\n", argv[0]);
         return 1;
+    }
+
+    const int threads = args.threads.value_or(args.client ? 0 : 1);
+    int32_t min_size = args.min_size.value_or(7'000'000 * (large_biomes ? 16 : 1));
+    if (threads != 0) {
+        std::printf("min_size = %" PRIi32 "\n", min_size);
     }
 
     if (no_gpu && args.devices.size() != 0) {
         std::fprintf(stderr, "The program was compiled without gpu support\n");
         return 1;
     }
-    if (no_cpu && args.threads != 0) {
+    if (no_cpu && threads != 0) {
         std::fprintf(stderr, "The program was compiled without cpu support\n");
         return 1;
     }
@@ -188,73 +194,6 @@ int main_inner(int argc, char **argv) {
         std::fprintf(stderr, "The program was compiled without net support\n");
         return 1;
     }
-    const int threads = args.threads.value_or(args.client ? 0 : 1);
-    uint64_t start_seed = args.start_seed;
-    GpuOutputs gpu_outputs;
-    CpuOutputs cpu_outputs;
-    #ifndef NO_GPU
-        std::vector<std::unique_ptr<GpuThread>> gpu_threads;
-        #endif
-    #ifndef NO_CPU
-        std::vector<std::unique_ptr<CpuThread>> cpu_threads;
-    #endif
-    #ifndef NO_NET
-        std::unique_ptr<ClientThread> client_thread;
-        std::unique_ptr<ServerThread> server_thread;
-    #endif
-    //std::vector<std::unique_ptr<GpuThread>> gpu_threads;
-    #ifdef BOINC
-        int device = -1;
-        BOINC_OPTIONS options;
-        boinc_options_defaults(options);
-	    options.normal_thread_priority = true;
-        boinc_init_options(&options);
-        APP_INIT_DATA aid;
-	    boinc_get_init_data(aid);
-        if (aid.gpu_device_num >= 0) {
-		    device = aid.gpu_device_num;
-		    fprintf(stderr,"boinc gpu %i gpuindex: %i \n", aid.gpu_device_num, device);
-		}
-
-        FILE *checkpoint_data = boinc_fopen("checkpoint.txt", "rb");
-        if(!checkpoint_data){
-            fprintf(stderr, "No checkpoint to load\n");
-
-        }
-        else{
-            boinc_begin_critical_section();
-            struct checkpoint_vars data_store;
-            fread(&data_store, sizeof(data_store), 1, checkpoint_data);
-            start_seed = data_store.offset;
-            elapsed_chkpoint = data_store.elapsed_chkpoint;
-            fprintf(stderr, "Checkpoint loaded, task time %d s, seed pos: %llu\n", elapsed_chkpoint, start_seed);
-            fclose(checkpoint_data);
-            boinc_end_critical_section();
-        }
-        gpu_threads.emplace_back(std::make_unique<GpuThread>(device, std::ref(gpu_outputs), start_seed, args.end_seed, elapsed_chkpoint));
-    #else
-        #ifndef NO_GPU
-            for (int device : args.devices) {
-                gpu_threads.emplace_back(std::make_unique<GpuThread>(device, std::ref(gpu_outputs)));
-            }
-            #endif
-
-        #ifndef NO_CPU
-            for (int i = 0; i < threads; i++) {
-                cpu_threads.emplace_back(std::make_unique<CpuThread>(i, std::ref(gpu_outputs), std::ref(cpu_outputs)));
-            }
-        #endif
-
-        #ifndef NO_NET
-            if (args.client) {
-                client_thread = std::make_unique<ClientThread>(args.client.value(), std::ref(gpu_outputs));
-            }
-
-            if (args.server) {
-                server_thread = std::make_unique<ServerThread>(args.server.value(), std::ref(gpu_outputs));
-            }
-        #endif
-    #endif
 
     std::printf("Hello! large_biomes = %s\n", large_biomes ? "true" : "false");
 
@@ -270,7 +209,38 @@ int main_inner(int argc, char **argv) {
         std::fflush(output_file);
     }
 
+    GpuOutputs gpu_outputs;
+    CpuOutputs cpu_outputs;
 
+#ifndef NO_GPU
+    uint64_t start_seed = args.start_seed.value_or(random_start_seed());
+    std::printf("Starting from %" PRIi64 "\n", start_seed);
+    SeedIterator seed_range(start_seed);
+
+    std::vector<std::unique_ptr<GpuThread>> gpu_threads;
+    for (int device : args.devices) {
+        gpu_threads.emplace_back(std::make_unique<GpuThread>(device, std::ref(seed_range), std::ref(gpu_outputs)));
+    }
+#endif
+
+#ifndef NO_CPU
+    std::vector<std::unique_ptr<CpuThread>> cpu_threads;
+    for (int i = 0; i < threads; i++) {
+        cpu_threads.emplace_back(std::make_unique<CpuThread>(i, min_size, std::ref(gpu_outputs), std::ref(cpu_outputs)));
+    }
+#endif
+
+#ifndef NO_NET
+    std::unique_ptr<ClientThread> client_thread;
+    if (args.client) {
+        client_thread = std::make_unique<ClientThread>(args.client.value(), std::ref(gpu_outputs));
+    }
+
+    std::unique_ptr<ServerThread> server_thread;
+    if (args.server) {
+        server_thread = std::make_unique<ServerThread>(args.server.value(), std::ref(gpu_outputs));
+    }
+#endif
 
     for (size_t i = 0;; i++) {
         if (threads != 0) {
@@ -292,51 +262,49 @@ int main_inner(int argc, char **argv) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
-#ifndef BOINC
-    #ifndef NO_GPU
-        for (auto &thread : gpu_threads) {
-            (*thread).stop();
-        }
-    #endif
-    #ifndef NO_CPU
-        for (auto &thread : cpu_threads) {
-            (*thread).stop();
-        }
-    #endif
-    #ifndef NO_NET
-        if (client_thread) {
-            (*client_thread).stop();
-        }
-        if (server_thread) {
-            (*server_thread).stop();
-        }
-    #endif
-
-    #ifndef NO_GPU
-        for (auto &thread : gpu_threads) {
-            (*thread).join();
-        }
-    #endif
-    #ifndef NO_CPU
-        for (auto &thread : cpu_threads) {
-            (*thread).join();
-        }
-    #endif
-    #ifndef NO_NET
-        if (client_thread) {
-            (*client_thread).join();
-        }
-        if (server_thread) {
-            (*server_thread).join();
-        }
-    #endif
-
-        if (output_file != nullptr) {
-            std::fclose(output_file);
-        }
-
+#ifndef NO_GPU
+    for (auto &thread : gpu_threads) {
+        (*thread).stop();
+    }
 #endif
+#ifndef NO_CPU
+    for (auto &thread : cpu_threads) {
+        (*thread).stop();
+    }
+#endif
+#ifndef NO_NET
+    if (client_thread) {
+        (*client_thread).stop();
+    }
+    if (server_thread) {
+        (*server_thread).stop();
+    }
+#endif
+
+#ifndef NO_GPU
+    for (auto &thread : gpu_threads) {
+        (*thread).join();
+    }
+#endif
+#ifndef NO_CPU
+    for (auto &thread : cpu_threads) {
+        (*thread).join();
+    }
+#endif
+#ifndef NO_NET
+    if (client_thread) {
+        (*client_thread).join();
+    }
+    if (server_thread) {
+        (*server_thread).join();
+    }
+#endif
+
+    if (output_file != nullptr) {
+        std::fclose(output_file);
+    }
 }
+
 int main(int argc, char **argv) {
     try {
         main_inner(argc, argv);

@@ -2,16 +2,24 @@
 
 #include "common.h"
 
+struct SeedIterator {
+    std::atomic_uint64_t pos;
+
+    SeedIterator(uint64_t start) : pos(start) {
+
+    }
+
+    uint64_t next(uint64_t count) {
+        return pos.fetch_add(count);
+    }
+};
+
 struct GpuThread: Thread<GpuThread> {
     int device;
+    SeedIterator &input;
     GpuOutputs &outputs;
-    #ifdef BOINC
-    uint64_t start_seed;
-    uint64_t end_seed;
-    double elapsed_chkpoint;
-    GpuThread(int device, GpuOutputs &outputs, uint64_t start_seed, uint64_t end_seed, double elapsed_chkpoint);
-    #else
-    GpuThread(int device, GpuOutputs &outputs);
-    #endif
+
+    GpuThread(int device, SeedIterator &input, GpuOutputs &outputs);
+
     void run();
 };
