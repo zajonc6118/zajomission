@@ -1146,7 +1146,6 @@ struct Template {
   static constexpr bool flipped_sparse_samples = FlippedSparseSamples;
   static constexpr bool move_center = MoveCenter;
   static constexpr bool only_a = OnlyA;
-
   static constexpr uint32_t threads_per_block = 256;
   static_assert(samples >= 32 && samples <= threads_per_block * threads_per_block && is_pow2(samples));
   static constexpr uint32_t samples_square_size = UINT32_C(1) << (log2(samples) + 1) / 2;
